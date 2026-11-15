@@ -1,0 +1,63 @@
+# Two-way mirror sync: keeps main identical between
+#   sravanku018/<repo>  <->  SmartSurveyX/<repo>
+# Runs on every push to main, every 30 minutes, and on demand.
+# SYNC_TOKEN must be a classic PAT (repo + workflow scopes) that can push
+# to both repos (SmartSurveyX is a push collaborator on the sravanku018 side).
+name: Mirror sync
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "*/30 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: mirror-sync-${{ github.repository }}
+  cancel-in-progress: true
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.SYNC_TOKEN }}
+
+      - name: Sync main with mirror repo
+        shell: bash
+        env:
+          SYNC_TOKEN: ${{ secrets.SYNC_TOKEN }}
+        run: |
+          set -euo pipefail
+          REPO="${GITHUB_REPOSITORY#*/}"
+          OWNER="${GITHUB_REPOSITORY%%/*}"
+          if [ "$OWNER" = "sravanku018" ]; then OTHER="SmartSurveyX/$REPO"; else OTHER="sravanku018/$REPO"; fi
+
+          git config user.name "mirror-sync-bot"
+          git config user.email "mirror-sync-bot@users.noreply.github.com"
+          git remote add other "https://x-access-token:${SYNC_TOKEN}@github.com/${OTHER}.git"
+          git fetch other main
+
+          SELF=$(git rev-parse HEAD)
+          OTHER_SHA=$(git rev-parse FETCH_HEAD)
+          echo "self=$SELF  mirror=$OTHER_SHA ($OTHER)"
+
+          if [ "$SELF" = "$OTHER_SHA" ]; then
+            echo "Already in sync."
+            exit 0
+          fi
+          if git merge-base --is-ancestor "$OTHER_SHA" "$SELF"; then
+            echo "Self ahead -> pushing to $OTHER"
+            git push other "HEAD:refs/heads/main"
+          elif git merge-base --is-ancestor "$SELF" "$OTHER_SHA"; then
+            echo "Mirror ahead -> fast-forwarding $GITHUB_REPOSITORY"
+            git push origin "$OTHER_SHA:refs/heads/main"
+          else
+            echo "::error::$REPO diverged between sravanku018 and SmartSurveyX — manual merge required"
+            exit 1
+          fi
